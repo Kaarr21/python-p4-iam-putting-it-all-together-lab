@@ -1,133 +1,82 @@
-#!/usr/bin/env python3
+from sqlalchemy.orm import validates
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy_serializer import SerializerMixin
 
-from flask import Flask, request, session, jsonify
-from flask_restful import Resource, Api
-from flask_migrate import Migrate
-from sqlalchemy.exc import IntegrityError
-from config import app, db, api
-from models import User, Recipe
+from config import db, bcrypt
 
-class Signup(Resource):
-    def post(self):
-        data = request.get_json()
+class User(db.Model, SerializerMixin):
+    __tablename__ = 'users'
 
-        username = data.get('username')
-        password = data.get('password')
-        image_url = data.get('image_url')
-        bio = data.get('bio')
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String, nullable=False, unique=True)
+    _password_hash = db.Column(db.String, nullable=False)
+    image_url = db.Column(db.String)
+    bio = db.Column(db.String)
 
-        if not username or not password:
-            return {'errors': ['Username and password are required']}, 422
+    # Relationship to recipes - this creates a 'recipes' attribute that returns a list
+    recipes = db.relationship("Recipe", backref="user", lazy=True, cascade="all, delete-orphan")
 
-        try:
-            new_user = User(
-                username=username,
-                image_url=image_url,
-                bio=bio
-            )
-            new_user.password_hash = password
-            db.session.add(new_user)
-            db.session.commit()
+    # Exclude the user data from recipe serialization to prevent circular references
+    serialize_rules = ("-recipes.user", "-_password_hash")
 
-            session['user_id'] = new_user.id
+    def __init__(self, username, image_url=None, bio=None):
+        self.username = username
+        self.image_url = image_url
+        self.bio = bio
 
-            return {
-                "id": new_user.id,
-                "username": new_user.username,
-                "image_url": new_user.image_url,
-                "bio": new_user.bio
-            }, 201
+    @hybrid_property
+    def password_hash(self):
+        raise AttributeError("Password hash is not readable.")
 
-        except IntegrityError:
-            db.session.rollback()
-            return {"errors": ["Username must be unique"]}, 422
-        except ValueError as ve:
-            return {"errors": [str(ve)]}, 422
+    @password_hash.setter
+    def password_hash(self, password):
+        if not password:
+            raise ValueError("Password is required.")
+        self._password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
 
-class CheckSession(Resource):
-    def get(self):
-        user_id = session.get('user_id')
-        if user_id:
-            user = User.query.get(user_id)
-            if user:
-                return {
-                    "id": user.id,
-                    "username": user.username,
-                    "image_url": user.image_url,
-                    "bio": user.bio
-                }, 200
-        return {}, 401
+    def authenticate(self, password):
+        return bcrypt.check_password_hash(self._password_hash, password)
 
-class Login(Resource):
-    def post(self):
-        data = request.get_json()
-        username = data.get("username")
-        password = data.get("password")
+    @validates('username')
+    def validate_username(self, key, username):
+        if not username or username.strip() == "":
+            raise ValueError("Username is required.")
+        return username
 
-        user = User.query.filter_by(username=username).first()
 
-        if user and user.authenticate(password):
-            session["user_id"] = user.id
-            return {
-                "id": user.id,
-                "username": user.username,
-                "image_url": user.image_url,
-                "bio": user.bio
-            }, 200
+class Recipe(db.Model, SerializerMixin):
+    __tablename__ = 'recipes'
 
-        return {"errors": ["Invalid username or password"]}, 401
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String, nullable=False)
+    instructions = db.Column(db.String, nullable=False)
+    minutes_to_complete = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
 
-class Logout(Resource):
-    def delete(self):
-        session.pop("user_id", None)
-        return {}, 204
+    # Exclude the recipe data from user serialization to prevent circular references
+    serialize_rules = ("-user.recipes",)
 
-class RecipeIndex(Resource):
-    def get(self):
-        user_id = session.get('user_id')
-        if not user_id:
-            return {"errors": ["Unauthorized"]}, 401
+    def __init__(self, title, instructions, minutes_to_complete, user_id):
+        self.title = title
+        self.instructions = instructions
+        self.minutes_to_complete = minutes_to_complete
+        self.user_id = user_id
 
-        try:
-            recipes = Recipe.query.all()
-            return [recipe.to_dict() for recipe in recipes], 200
-        except Exception as e:
-            return {"errors": [str(e)]}, 500
+    @validates('title')
+    def validate_title(self, key, title):
+        if not title or title.strip() == "":
+            raise ValueError("Title is required.")
+        return title
 
-    def post(self):
-        user_id = session.get("user_id")
-        if not user_id:
-            return {"errors": ["Unauthorized"]}, 401
-
-        data = request.get_json()
-        title = data.get("title")
-        instructions = data.get("instructions")
-        minutes = data.get("minutes_to_complete")
-
-        try:
-            new_recipe = Recipe(
-                title=title,
-                instructions=instructions,
-                minutes_to_complete=minutes,
-                user_id=user_id
-            )
-
-            db.session.add(new_recipe)
-            db.session.commit()
-            return new_recipe.to_dict(), 201
-        except ValueError as ve:
-            return {"errors": [str(ve)]}, 422
-        except Exception as e:
-            db.session.rollback()
-            return {"errors": [str(e)]}, 500
-
-# Register routes
-api.add_resource(Signup, '/signup', endpoint='signup')
-api.add_resource(CheckSession, '/check_session', endpoint='check_session')
-api.add_resource(Login, '/login', endpoint='login')
-api.add_resource(Logout, '/logout', endpoint='logout')
-api.add_resource(RecipeIndex, '/recipes', endpoint='recipes')
-
-if __name__ == '__main__':
-    app.run(port=5555, debug=True)
-    
+    @validates('instructions')
+    def validate_instructions(self, key, instructions):
+        if not instructions or len(instructions.strip()) < 50:
+            raise ValueError("Instructions must be at least 50 characters long.")
+        return instructions
+        
+    @validates('minutes_to_complete')
+    def validate_minutes(self, key, minutes):
+        if type(minutes) is not int or minutes <= 0:
+            raise ValueError("Minutes to complete must be a positive integer.")
+        return minutes
+        
