@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 from flask import Flask, request, session, jsonify
-from flask_restful import Migrate
-from sqlalchemy.exc import Int
-from sqlalchemy.orm import validates
+from flask_restful import Resource, Migrate
+from sqlalchemy.exc import IntegrityError
 from config import app, db, api
 from models import User, Recipe
+
 class Signup(Resource):
     def post(self):
         data = request.get_json()
@@ -88,11 +88,8 @@ class RecipeIndex(Resource):
             return {"errors": ["Unauthorized"]}, 401
 
         try:
-            user = User.query.get(user_id)
-            if user:
-                return [recipe.to_dict() for recipe in user.recipes], 200
-            else:
-                return {"errors": ["User not found"]}, 404
+            recipes = Recipe.query.all()
+            return [recipe.to_dict() for recipe in recipes], 200
         except Exception as e:
             return {"errors": [str(e)]}, 500
 
